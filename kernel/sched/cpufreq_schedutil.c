@@ -367,14 +367,6 @@ static unsigned long sugov_get_util(struct sugov_cpu *sg_cpu)
 	sg_cpu->max = max;
 	sg_cpu->bw_dl = cpu_bw_dl(rq);
 
-	spin_lock(&per_cpu(cpufreq_idle_cpu_lock, sg_cpu->cpu));
-	if (per_cpu(cpufreq_idle_cpu, sg_cpu->cpu)) {
-		spin_unlock(&per_cpu(cpufreq_idle_cpu_lock, sg_cpu->cpu));
-		return 0;
-	}
-
-	spin_unlock(&per_cpu(cpufreq_idle_cpu_lock, sg_cpu->cpu));
-
 	return schedutil_cpu_util(sg_cpu->cpu, util_cfs, max,
 				  FREQUENCY_UTIL, NULL);
 }
