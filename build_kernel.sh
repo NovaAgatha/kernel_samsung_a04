@@ -75,6 +75,31 @@ fi
 build() {
 	if [[ $@ = "defconfig" ]]; then
 		make `echo $MKFLAG` `echo $DEFCONFIG`
+		if [[ $LTO = "thin" ]]; then
+			pr_info "LTO: thin"
+			setconfig disable LTO_NONE
+			setconfig enable LTO
+			setconfig enable THINLTO
+			setconfig enable LTO_CLANG
+			setconfig enable ARCH_SUPPORTS_LTO_CLANG
+			setconfig enable ARCH_SUPPORTS_THINLTO
+		elif [[ $LTO = "full" ]]; then
+			pr_info "LTO: full"
+			setconfig disable LTO_NONE
+			setconfig enable LTO
+			setconfig disable THINLTO
+			setconfig enable LTO_CLANG
+			setconfig enable ARCH_SUPPORTS_LTO_CLANG
+			setconfig enable ARCH_SUPPORTS_THINLTO
+		else
+			pr_info "LTO: none"
+			setconfig enable LTO_NONE
+			setconfig disable LTO
+			setconfig disable THINLTO
+			setconfig disable LTO_CLANG
+			setconfig enable ARCH_SUPPORTS_LTO_CLANG
+			setconfig enable ARCH_SUPPORTS_THINLTO
+		fi
 	elif [[ $@ = "kernel" ]]; then
 		make `echo $MKFLAG`
 	else
