@@ -9,6 +9,7 @@
 # conmakehash:	 Create arrays for initializing the kernel console tables
 
 HOST_EXTRACFLAGS += -I$(srctree)/tools/include
+HOST_EXTRACFLAGS += -Wno-deprecated-declarations
 
 CRYPTO_LIBS = $(shell pkg-config --libs libcrypto 2> /dev/null || echo -lcrypto)
 CRYPTO_CFLAGS = $(shell pkg-config --cflags libcrypto 2> /dev/null)
