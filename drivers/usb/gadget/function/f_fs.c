@@ -1823,7 +1823,7 @@ static struct ffs_data *ffs_data_new(const char *dev_name)
 
 	return ffs;
 }
-//Bug-715587,houdujing.wt,add 2022.6.8,modify for kernel init failed
+
 static void ffs_data_clear(struct ffs_data *ffs)
 {
 	struct ffs_epfile *epfiles;
@@ -1860,7 +1860,6 @@ static void ffs_data_reset(struct ffs_data *ffs)
 
 	ffs_data_clear(ffs);
 
-	ffs->epfiles = NULL;
 	ffs->raw_descs_data = NULL;
 	ffs->raw_descs = NULL;
 	ffs->raw_strings = NULL;
