@@ -52,6 +52,12 @@ config WT_FINAL_RELEASE
          Say Y here for final release
 #-S96818AA1-2426, wangzhuquan1.wt,add, 20230423,Volume down key + power key enter dump mode for 7 seconds
 
+config RISSU_OVERCLOCK
+	bool "Overclock GPU"
+	default n
+	help
+	 If this option enabled, it will overclock gpu
+
 source "drivers/amba/Kconfig"
 
 source "drivers/base/Kconfig"
