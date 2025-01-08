@@ -32,5 +32,6 @@ source "lib/Kconfig"
 source "lib/Kconfig.debug"
 
 config RISSU_OVERCLOCK
-    bool
+    bool "Overclock"
+    default n
     
