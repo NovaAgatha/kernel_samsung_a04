@@ -1760,6 +1760,7 @@ static void ffs_data_closed(struct ffs_data *ffs)
 {
 	struct ffs_epfile *epfiles;
 	unsigned long flags;
+
 	ENTER();
 
 	/* to get updated opened atomic variable value */
@@ -1772,9 +1773,11 @@ static void ffs_data_closed(struct ffs_data *ffs)
 			ffs->epfiles = NULL;
 			spin_unlock_irqrestore(&ffs->eps_lock,
 							flags);
+
 			if (epfiles)
 				ffs_epfiles_destroy(epfiles,
-						   ffs->eps_count);
+						 ffs->eps_count);
+
 			if (ffs->setup_state == FFS_SETUP_PENDING)
 				__ffs_ep0_stall(ffs);
 		} else {
@@ -1828,6 +1831,7 @@ static void ffs_data_clear(struct ffs_data *ffs)
 {
 	struct ffs_epfile *epfiles;
 	unsigned long flags;
+
 	ENTER();
 
 	ffs_closed(ffs);
@@ -1839,16 +1843,21 @@ static void ffs_data_clear(struct ffs_data *ffs)
 	ffs->epfiles = NULL;
 	spin_unlock_irqrestore(&ffs->eps_lock, flags);
 
-	if (epfiles){
+	/*
+	 * potential race possible between ffs_func_eps_disable
+	 * & ffs_epfile_release therefore maintaining a local
+	 * copy of epfile will save us from use-after-free.
+	 */
+	if (epfiles) {
 		ffs_epfiles_destroy(epfiles, ffs->eps_count);
 		ffs->epfiles = NULL;
 	}
 
-	if (ffs->ffs_eventfd){
+	if (ffs->ffs_eventfd) {
 		eventfd_ctx_put(ffs->ffs_eventfd);
 		ffs->ffs_eventfd = NULL;
 	}
-//Bug-715587,houdujing.wt,add 2022.6.8,modify for kernel init failed
+	
 	kfree(ffs->raw_descs_data);
 	kfree(ffs->raw_strings);
 	kfree(ffs->stringtabs);
