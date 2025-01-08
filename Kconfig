@@ -30,3 +30,7 @@ source "crypto/Kconfig"
 source "lib/Kconfig"
 
 source "lib/Kconfig.debug"
+
+config RISSU_OVERCLOCK
+    bool
+    
