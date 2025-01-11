@@ -162,7 +162,7 @@
 #endif
 
 #ifdef CONFIG_RISSU_OVERCLOCK
-#define SEG_GPU_DVFS_VSRAM0		(110000)	/* mV x 100 */
+#define SEG_GPU_DVFS_VSRAM0		(107500)	/* mV x 100 */
 #define SEG_GPU_DVFS_VSRAM1		(105000)	/* mV x 100 */
 #define SEG_GPU_DVFS_VSRAM2		(102500)	/* mV x 100 */
 #define SEG_GPU_DVFS_VSRAM3		(100000)	/* mV x 100 */
