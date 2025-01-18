@@ -6134,20 +6134,15 @@ schedtune_margin(unsigned long signal, long boost)
 	return margin;
 }
 
-inline long
-schedtune_cpu_margin_with(unsigned long util, int cpu, struct task_struct *p)
+static inline int
+schedtune_cpu_margin(unsigned long util, int cpu)
 {
-	int boost = schedtune_cpu_boost_with(cpu, p);
-	long margin;
+	int boost = schedtune_cpu_boost(cpu);
 
 	if (boost == 0)
-		margin = 0;
-	else
-		margin = schedtune_margin(util, boost);
+		return 0;
 
-	trace_sched_boost_cpu(cpu, util, margin);
-
-	return margin;
+	return schedtune_margin(util, boost);
 }
 
 long schedtune_task_margin(struct task_struct *task)
@@ -6165,10 +6160,22 @@ long schedtune_task_margin(struct task_struct *task)
 	return margin;
 }
 
+unsigned long
+stune_util(int cpu, unsigned long other_util)
+{
+	unsigned long util = min_t(unsigned long, SCHED_CAPACITY_SCALE,
+				   cpu_util_cfs(cpu_rq(cpu)) + other_util);
+	long margin = schedtune_cpu_margin(util, cpu);
+
+	trace_sched_boost_cpu(cpu, util, margin);
+
+	return util + margin;
+}
+
 #else /* CONFIG_SCHED_TUNE */
 
-inline long
-schedtune_cpu_margin_with(unsigned long util, int cpu, struct task_struct *p)
+static inline int
+schedtune_cpu_margin(unsigned long util, int cpu)
 {
 	return 0;
 }
@@ -6705,7 +6712,6 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	return target;
 }
 
-#ifdef CONFIG_MTK_SCHED_EXTENSION
 /*
  * @p: the task want to be located at.
  *
@@ -6759,7 +6765,6 @@ find_idle_cpu:
 
 	return best_idle_cpu;
 }
-#endif /* CONFIG_MTK_SCHED_EXTENSION */
 
 #ifdef CONFIG_ARM64
 static void arch_get_cluster_cpus(struct cpumask *cpus, int cluster_id)
@@ -6789,7 +6794,7 @@ static void arch_get_cluster_cpus(struct cpumask *cpus, int socket_id)
 }
 #endif
 
-#ifdef CONFIG_MTK_SCHED_EXTENSION
+
 /* To find a CPU with max spare capacity in the same cluster with target */
 static
 int select_max_spare_capacity(struct task_struct *p, int target)
@@ -6856,14 +6861,16 @@ int select_max_spare_capacity(struct task_struct *p, int target)
 	else
 		return task_cpu(p);
 }
-#endif /* CONFIG_MTK_SCHED_EXTENSION */
 
 static int
 ___select_idle_sibling(struct task_struct *p, int prev_cpu, int new_cpu)
 {
-#ifdef CONFIG_MTK_SCHED_EXTENSION
 	if (sched_feat(SCHED_MTK_EAS)) {
-		bool prefer_idle = uclamp_latency_sensitive(p);
+#ifdef CONFIG_SCHED_TUNE
+		bool prefer_idle = uclamp_latency_sensitive(p) > 0;
+#else
+		bool prefer_idle = true;
+#endif
 		int idle_cpu;
 
 		idle_cpu = find_best_idle_cpu(p, prefer_idle);
@@ -6873,9 +6880,7 @@ ___select_idle_sibling(struct task_struct *p, int prev_cpu, int new_cpu)
 			new_cpu = select_max_spare_capacity(p, new_cpu);
 	} else
 		new_cpu = select_idle_sibling(p, prev_cpu, new_cpu);
-#else /* CONFIG_MTK_SCHED_EXTENSION */
-	new_cpu = select_idle_sibling(p, prev_cpu, new_cpu);
-#endif /* CONFIG_MTK_SCHED_EXTENSION */
+
 	return new_cpu;
 }
 
@@ -7748,7 +7753,7 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 	/* If there is only one sensible candidate, select it now. */
 	cpu = cpumask_first(candidates);
 	if (!cpu_isolated(cpu))
-		if (weight == 1 && ((uclamp_latency_sensitive(p)
+		if (weight == 1 && ((schedtune_prefer_idle(p)
 				&& idle_cpu(cpu)) ||
 				(cpu == prev_cpu))) {
 			best_energy_cpu = cpu;
@@ -7929,7 +7934,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag,
 #ifdef CONFIG_MTK_SCHED_EXTENSION
 	trace_sched_select_task_rq(p, result, prev_cpu, cpu,
 		task_util_est(p), uclamp_task_util(p),
-		uclamp_latency_sensitive(p), wake_flags);
+		(schedtune_prefer_idle(p) > 0), wake_flags);
 #endif
 	return cpu;
 }
