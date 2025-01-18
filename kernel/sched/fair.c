@@ -45,8 +45,8 @@
 unsigned int sysctl_sched_latency			= 24000000ULL;
 static unsigned int normalized_sysctl_sched_latency	= 24000000ULL;
 #else // CONFIG_SCHED_BORE
-unsigned int sysctl_sched_latency			= 5000000ULL;
-unsigned int normalized_sysctl_sched_latency		= 5000000ULL;
+unsigned int sysctl_sched_latency			= 6000000ULL;
+unsigned int normalized_sysctl_sched_latency		= 6000000ULL;
 #endif // CONFIG_SCHED_BORE
 
 /*
@@ -87,8 +87,8 @@ enum sched_tunable_scaling sysctl_sched_tunable_scaling = SCHED_TUNABLESCALING_L
 unsigned int sysctl_sched_min_granularity			= 3000000ULL;
 unsigned int normalized_sysctl_sched_min_granularity	= 3000000ULL;
 #else // CONFIG_SCHED_BORE
-unsigned int sysctl_sched_min_granularity			= 500000ULL;
-unsigned int normalized_sysctl_sched_min_granularity	= 500000ULL;
+unsigned int sysctl_sched_min_granularity			= 750000ULL;
+unsigned int normalized_sysctl_sched_min_granularity	= 750000ULL;
 #endif // CONFIG_SCHED_BORE
 
 /*
@@ -4053,29 +4053,6 @@ static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 #endif
 }
 
-static inline bool entity_is_long_sleeper(struct sched_entity *se)
-{
-	struct cfs_rq *cfs_rq;
-	u64 sleep_time;
-
-	if (se->exec_start == 0)
-		return false;
-
-	cfs_rq = cfs_rq_of(se);
-
-	sleep_time = rq_clock_task(rq_of(cfs_rq));
-
-	/* Happen while migrating because of clock task divergence */
-	if (sleep_time <= se->exec_start)
-		return false;
-
-	sleep_time -= se->exec_start;
-	if (sleep_time > ((1ULL << 63) / scale_load_down(NICE_0_LOAD)))
-		return true;
-
-	return false;
-}
-
 static void
 place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 {
@@ -4104,29 +4081,8 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 		vruntime -= thresh;
 	}
 
-	/*
-	 * Pull vruntime of the entity being placed to the base level of
-	 * cfs_rq, to prevent boosting it if placed backwards.
-	 * However, min_vruntime can advance much faster than real time, with
-	 * the extreme being when an entity with the minimal weight always runs
-	 * on the cfs_rq. If the waking entity slept for a long time, its
-	 * vruntime difference from min_vruntime may overflow s64 and their
-	 * comparison may get inversed, so ignore the entity's original
-	 * vruntime in that case.
-	 * The maximal vruntime speedup is given by the ratio of normal to
-	 * minimal weight: scale_load_down(NICE_0_LOAD) / MIN_SHARES.
-	 * When placing a migrated waking entity, its exec_start has been set
-	 * from a different rq. In order to take into account a possible
-	 * divergence between new and prev rq's clocks task because of irq and
-	 * stolen time, we take an additional margin.
-	 * So, cutting off on the sleep time of
-	 *     2^63 / scale_load_down(NICE_0_LOAD) ~ 104 days
-	 * should be safe.
-	 */
-	if (entity_is_long_sleeper(se))
-		se->vruntime = vruntime;
-	else
-		se->vruntime = max_vruntime(se->vruntime, vruntime);
+	/* ensure we never gain time by being placed backwards. */
+	se->vruntime = max_vruntime(se->vruntime, vruntime);
 }
 
 static void check_enqueue_throttle(struct cfs_rq *cfs_rq);
@@ -4221,9 +4177,6 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 	if (flags & ENQUEUE_WAKEUP)
 		place_entity(cfs_rq, se, 0);
-	/* Entity has migrated, no longer consider this task hot */
-	if (flags & ENQUEUE_MIGRATED)
-		se->exec_start = 0;
 
 	check_schedstat_required();
 	update_stats_enqueue(cfs_rq, se, flags);
@@ -5476,6 +5429,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = &p->se;
 	int task_new = !(flags & ENQUEUE_WAKEUP);
+	int is_idle = idle_cpu(cpu_of(rq));
 
 	/*
 	 * The code below (indirectly) updates schedutil which looks at
@@ -5546,6 +5500,14 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		inc_nr_heavy_running(2, p, 1, false);
 #endif
 		add_nr_running(rq, 1);
+
+		/* if first is idle, some governors may not
+		 * update frequency, we must update again,
+		 * because idle_cpu return false until now.
+		 */
+		if (is_idle)
+			cfs_rq_util_change(&rq->cfs, 0);
+
 		/*
 		 * Since new tasks are assigned an initial util_avg equal to
 		 * half of the spare capacity of their CPU, tiny tasks have the
@@ -6254,7 +6216,7 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p,
 		  int this_cpu, int sd_flag)
 {
 	struct sched_group *idlest = NULL, *group = sd->groups;
-	struct sched_group *most_spare_sg = NULL;
+	struct sched_group *most_spare_sg = NULL, *this_group = NULL;
 	unsigned long min_runnable_load = ULONG_MAX;
 	unsigned long this_runnable_load = ULONG_MAX;
 	unsigned long min_avg_load = ULONG_MAX, this_avg_load = ULONG_MAX;
@@ -6288,6 +6250,7 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p,
 		avg_load = 0;
 		runnable_load = 0;
 		max_spare_cap = 0;
+		group->idle_cpus = 0;
 
 		for_each_cpu(i, sched_group_span(group)) {
 			/* Bias balancing toward CPUs of our domain */
@@ -6295,6 +6258,9 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p,
 				load = source_load(i, load_idx);
 			else
 				load = target_load(i, load_idx);
+
+			if (idle_cpu(i))
+				group->idle_cpus++;
 
 			runnable_load += load;
 
@@ -6317,6 +6283,7 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p,
 					group->sgc->capacity;
 
 		if (local_group) {
+			this_group = group;
 			this_runnable_load = runnable_load;
 			this_avg_load = avg_load;
 			this_spare = max_spare_cap;
@@ -6368,6 +6335,12 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p,
 		return most_spare_sg;
 
 skip_spare:
+	if (idlest && idlest->idle_cpus > 0)
+		if (!this_group || idlest->idle_cpus > this_group->idle_cpus)
+			return idlest;
+	if (this_group && this_group->idle_cpus > 0)
+		return this_group;
+
 	if (!idlest)
 		return NULL;
 
@@ -6439,7 +6412,7 @@ find_idlest_group_cpu(struct sched_group *group, struct task_struct *p, int this
 			}
 		} else if (shallowest_idle_cpu == -1) {
 			load = weighted_cpuload(cpu_rq(i));
-#ifdef CONFIG_MTK_SCHED_INTEROP
+#if defined(CONFIG_MTK_SCHED_INTEROP) && defined(CONFIG_RT_GROUP_SCHED)
 			load += mt_rt_load(i);
 #endif
 			if (load < min_load) {
@@ -6489,6 +6462,8 @@ static inline int find_idlest_cpu(struct sched_domain *sd, struct task_struct *p
 			sd = sd->child;
 			continue;
 		}
+		if (idle_cpu(new_cpu))
+			break;
 
 		/* Now try balancing at a lower domain level of 'new_cpu': */
 		cpu = new_cpu;
@@ -7778,7 +7753,7 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 	/* If there is only one sensible candidate, select it now. */
 	cpu = cpumask_first(candidates);
 	if (!cpu_isolated(cpu))
-		if (weight == 1 && ((mtk_prefer_idle(p)
+		if (weight == 1 && ((schedtune_prefer_idle(p)
 				&& idle_cpu(cpu)) ||
 				(cpu == prev_cpu))) {
 			best_energy_cpu = cpu;
@@ -7845,7 +7820,7 @@ unlock:
 		return best_energy_cpu;
 #endif
 
-	return -1;
+	return prev_cpu;
 
 fail:
 	rcu_read_unlock();
@@ -7959,7 +7934,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag,
 #ifdef CONFIG_MTK_SCHED_EXTENSION
 	trace_sched_select_task_rq(p, result, prev_cpu, cpu,
 		task_util_est(p), uclamp_task_util(p),
-		mtk_prefer_idle(p), wake_flags);
+		(schedtune_prefer_idle(p) > 0), wake_flags);
 #endif
 	return cpu;
 }
@@ -8021,6 +7996,9 @@ static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 
 	/* Tell new CPU we are migrated */
 	p->se.avg.last_update_time = 0;
+
+	/* We have migrated, no longer consider this task hot */
+	p->se.exec_start = 0;
 
 	update_scan_period(p, new_cpu);
 }
@@ -10437,7 +10415,7 @@ static int load_balance(int this_cpu, struct rq *this_rq,
 		.sd		= sd,
 		.dst_cpu	= this_cpu,
 		.dst_rq		= this_rq,
-		.dst_grpmask    = group_balance_mask(sd->groups),
+		.dst_grpmask    = sched_group_span(sd->groups),
 		.idle		= idle,
 		.loop_break	= sched_nr_migrate_break,
 		.cpus		= cpus,
