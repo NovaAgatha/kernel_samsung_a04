@@ -1,3 +1,4 @@
+
 /* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_SCHED_SYSCTL_H
 #define _LINUX_SCHED_SYSCTL_H
@@ -96,6 +97,13 @@ extern int sysctl_numa_balancing(struct ctl_table *table, int write,
 extern int sysctl_schedstats(struct ctl_table *table, int write,
 				 void __user *buffer, size_t *lenp,
 				 loff_t *ppos);
+
+#ifdef CONFIG_SMP
+extern unsigned int sysctl_sched_pelt_multiplier;
+
+int sched_pelt_multiplier(struct ctl_table *table, int write, void *buffer,
+		size_t *lenp, loff_t *ppos);
+#endif
 
 #if defined(CONFIG_ENERGY_MODEL) && defined(CONFIG_CPU_FREQ_GOV_SCHEDUTIL)
 extern unsigned int sysctl_sched_energy_aware;

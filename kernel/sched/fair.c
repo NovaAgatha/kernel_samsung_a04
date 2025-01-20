@@ -881,11 +881,6 @@ void post_init_entity_util_avg(struct sched_entity *se)
 	long cpu_scale = arch_scale_cpu_capacity(NULL, cpu_of(rq_of(cfs_rq)));
 	long cap = (long)(cpu_scale - cfs_rq->avg.util_avg) / 2;
 
-	if (sched_forked_ramup_factor() != 0) {
-		cap = (long)(SCHED_CAPACITY_SCALE - cfs_rq->avg.util_avg) *
-				sched_forked_ramup_factor() / 100;
-	}
-
 	if (cap > 0) {
 		if (cfs_rq->avg.util_avg != 0) {
 			sa->util_avg  = cfs_rq->avg.util_avg * se->load.weight;
@@ -4053,6 +4048,29 @@ static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 #endif
 }
 
+static inline bool entity_is_long_sleeper(struct sched_entity *se)
+{
+	struct cfs_rq *cfs_rq;
+	u64 sleep_time;
+
+	if (se->exec_start == 0)
+		return false;
+
+	cfs_rq = cfs_rq_of(se);
+
+	sleep_time = rq_clock_task(rq_of(cfs_rq));
+
+	/* Happen while migrating because of clock task divergence */
+	if (sleep_time <= se->exec_start)
+		return false;
+
+	sleep_time -= se->exec_start;
+	if (sleep_time > ((1ULL << 63) / scale_load_down(NICE_0_LOAD)))
+		return true;
+
+	return false;
+}
+
 static void
 place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 {
@@ -4081,8 +4099,29 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 		vruntime -= thresh;
 	}
 
-	/* ensure we never gain time by being placed backwards. */
-	se->vruntime = max_vruntime(se->vruntime, vruntime);
+	/*
+	 * Pull vruntime of the entity being placed to the base level of
+	 * cfs_rq, to prevent boosting it if placed backwards.
+	 * However, min_vruntime can advance much faster than real time, with
+	 * the extreme being when an entity with the minimal weight always runs
+	 * on the cfs_rq. If the waking entity slept for a long time, its
+	 * vruntime difference from min_vruntime may overflow s64 and their
+	 * comparison may get inversed, so ignore the entity's original
+	 * vruntime in that case.
+	 * The maximal vruntime speedup is given by the ratio of normal to
+	 * minimal weight: scale_load_down(NICE_0_LOAD) / MIN_SHARES.
+	 * When placing a migrated waking entity, its exec_start has been set
+	 * from a different rq. In order to take into account a possible
+	 * divergence between new and prev rq's clocks task because of irq and
+	 * stolen time, we take an additional margin.
+	 * So, cutting off on the sleep time of
+	 *     2^63 / scale_load_down(NICE_0_LOAD) ~ 104 days
+	 * should be safe.
+	 */
+	if (entity_is_long_sleeper(se))
+		se->vruntime = vruntime;
+	else
+		se->vruntime = max_vruntime(se->vruntime, vruntime);
 }
 
 static void check_enqueue_throttle(struct cfs_rq *cfs_rq);
@@ -4177,6 +4216,9 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 	if (flags & ENQUEUE_WAKEUP)
 		place_entity(cfs_rq, se, 0);
+	/* Entity has migrated, no longer consider this task hot */
+	if (flags & ENQUEUE_MIGRATED)
+		se->exec_start = 0;
 
 	check_schedstat_required();
 	update_stats_enqueue(cfs_rq, se, flags);
@@ -5429,7 +5471,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = &p->se;
 	int task_new = !(flags & ENQUEUE_WAKEUP);
-	int is_idle = idle_cpu(cpu_of(rq));
 
 	/*
 	 * The code below (indirectly) updates schedutil which looks at
@@ -5500,14 +5541,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		inc_nr_heavy_running(2, p, 1, false);
 #endif
 		add_nr_running(rq, 1);
-
-		/* if first is idle, some governors may not
-		 * update frequency, we must update again,
-		 * because idle_cpu return false until now.
-		 */
-		if (is_idle)
-			cfs_rq_util_change(&rq->cfs, 0);
-
 		/*
 		 * Since new tasks are assigned an initial util_avg equal to
 		 * half of the spare capacity of their CPU, tiny tasks have the
@@ -6134,15 +6167,20 @@ schedtune_margin(unsigned long signal, long boost)
 	return margin;
 }
 
-static inline int
-schedtune_cpu_margin(unsigned long util, int cpu)
+inline long
+schedtune_cpu_margin_with(unsigned long util, int cpu, struct task_struct *p)
 {
-	int boost = schedtune_cpu_boost(cpu);
+	int boost = schedtune_cpu_boost_with(cpu, p);
+	long margin;
 
 	if (boost == 0)
-		return 0;
+		margin = 0;
+	else
+		margin = schedtune_margin(util, boost);
 
-	return schedtune_margin(util, boost);
+	trace_sched_boost_cpu(cpu, util, margin);
+
+	return margin;
 }
 
 long schedtune_task_margin(struct task_struct *task)
@@ -6160,22 +6198,10 @@ long schedtune_task_margin(struct task_struct *task)
 	return margin;
 }
 
-unsigned long
-stune_util(int cpu, unsigned long other_util)
-{
-	unsigned long util = min_t(unsigned long, SCHED_CAPACITY_SCALE,
-				   cpu_util_cfs(cpu_rq(cpu)) + other_util);
-	long margin = schedtune_cpu_margin(util, cpu);
-
-	trace_sched_boost_cpu(cpu, util, margin);
-
-	return util + margin;
-}
-
 #else /* CONFIG_SCHED_TUNE */
 
-static inline int
-schedtune_cpu_margin(unsigned long util, int cpu)
+inline long
+schedtune_cpu_margin_with(unsigned long util, int cpu, struct task_struct *p)
 {
 	return 0;
 }
@@ -6712,6 +6738,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	return target;
 }
 
+#ifdef CONFIG_MTK_SCHED_EXTENSION
 /*
  * @p: the task want to be located at.
  *
@@ -6765,6 +6792,7 @@ find_idle_cpu:
 
 	return best_idle_cpu;
 }
+#endif /* CONFIG_MTK_SCHED_EXTENSION */
 
 #ifdef CONFIG_ARM64
 static void arch_get_cluster_cpus(struct cpumask *cpus, int cluster_id)
@@ -6794,7 +6822,7 @@ static void arch_get_cluster_cpus(struct cpumask *cpus, int socket_id)
 }
 #endif
 
-
+#ifdef CONFIG_MTK_SCHED_EXTENSION
 /* To find a CPU with max spare capacity in the same cluster with target */
 static
 int select_max_spare_capacity(struct task_struct *p, int target)
@@ -6861,16 +6889,14 @@ int select_max_spare_capacity(struct task_struct *p, int target)
 	else
 		return task_cpu(p);
 }
+#endif /* CONFIG_MTK_SCHED_EXTENSION */
 
 static int
 ___select_idle_sibling(struct task_struct *p, int prev_cpu, int new_cpu)
 {
+#ifdef CONFIG_MTK_SCHED_EXTENSION
 	if (sched_feat(SCHED_MTK_EAS)) {
-#ifdef CONFIG_SCHED_TUNE
-		bool prefer_idle = uclamp_latency_sensitive(p) > 0;
-#else
-		bool prefer_idle = true;
-#endif
+		bool prefer_idle = uclamp_latency_sensitive(p);
 		int idle_cpu;
 
 		idle_cpu = find_best_idle_cpu(p, prefer_idle);
@@ -6880,7 +6906,9 @@ ___select_idle_sibling(struct task_struct *p, int prev_cpu, int new_cpu)
 			new_cpu = select_max_spare_capacity(p, new_cpu);
 	} else
 		new_cpu = select_idle_sibling(p, prev_cpu, new_cpu);
-
+#else /* CONFIG_MTK_SCHED_EXTENSION */
+	new_cpu = select_idle_sibling(p, prev_cpu, new_cpu);
+#endif /* CONFIG_MTK_SCHED_EXTENSION */
 	return new_cpu;
 }
 
@@ -7753,7 +7781,7 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 	/* If there is only one sensible candidate, select it now. */
 	cpu = cpumask_first(candidates);
 	if (!cpu_isolated(cpu))
-		if (weight == 1 && ((schedtune_prefer_idle(p)
+		if (weight == 1 && ((uclamp_latency_sensitive(p)
 				&& idle_cpu(cpu)) ||
 				(cpu == prev_cpu))) {
 			best_energy_cpu = cpu;
@@ -7780,7 +7808,7 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 			int cur_cpu_cap = capacity_orig_of(cpu);
 
 			if (cur_cpu_cap > best_cpu_cap){
-				if((best_energy - cur_energy) > (best_energy >> 4 )) {
+				if((best_energy - cur_energy) > max(1, (best_energy >> 4))) {
 					best_energy = cur_energy;
 					best_energy_cpu = cpu;
 				}
@@ -7820,7 +7848,7 @@ unlock:
 		return best_energy_cpu;
 #endif
 
-	return prev_cpu;
+	return -1;
 
 fail:
 	rcu_read_unlock();
@@ -7867,7 +7895,7 @@ SELECT_TASK_RQ_FAIR(struct task_struct *p, int prev_cpu, int sd_flag,
 			new_cpu = prev_cpu;
 		}
 
-		want_affine = !wake_wide(p, sibling_count_hint) &&
+		want_affine =!READ_ONCE(rd->overutilized) && !wake_wide(p, sibling_count_hint) &&
 			      !wake_cap(p, cpu, prev_cpu) &&
 			      cpumask_test_cpu(cpu, &p->cpus_allowed);
 	}
@@ -7934,7 +7962,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag,
 #ifdef CONFIG_MTK_SCHED_EXTENSION
 	trace_sched_select_task_rq(p, result, prev_cpu, cpu,
 		task_util_est(p), uclamp_task_util(p),
-		(schedtune_prefer_idle(p) > 0), wake_flags);
+		uclamp_latency_sensitive(p), wake_flags);
 #endif
 	return cpu;
 }
@@ -7996,9 +8024,6 @@ static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 
 	/* Tell new CPU we are migrated */
 	p->se.avg.last_update_time = 0;
-
-	/* We have migrated, no longer consider this task hot */
-	p->se.exec_start = 0;
 
 	update_scan_period(p, new_cpu);
 }
@@ -10415,7 +10440,7 @@ static int load_balance(int this_cpu, struct rq *this_rq,
 		.sd		= sd,
 		.dst_cpu	= this_cpu,
 		.dst_rq		= this_rq,
-		.dst_grpmask    = sched_group_span(sd->groups),
+		.dst_grpmask    = group_balance_mask(sd->groups),
 		.idle		= idle,
 		.loop_break	= sched_nr_migrate_break,
 		.cpus		= cpus,
